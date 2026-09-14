@@ -2,6 +2,9 @@
   if (globalThis.WebPloverContentScriptInstalled) return;
   globalThis.WebPloverContentScriptInstalled = true;
   const PROTECTED_HINT = /\b(password|passcode|login|log[ -]?in|sign[ -]?in|username|user[ -]?name|otp|one[ -]?time|verification|verify|captcha|card|credit|debit|cvv|cvc|iban|bank|routing|account number|tax|ssn|social security|passport|driver.?s? licen[cs]e|national id)\b/i;
+  const PROTECTED_INPUT_TYPES = ["password", "hidden", "file", "submit", "button", "reset", "checkbox", "radio", "image", "date", "datetime-local", "time", "month", "week", "range", "color", "search"];
+  const PROTECTED_AUTOCOMPLETE = new Set(["one-time-code", "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-type"]);
+  const PROTECTED_INPUT_MARKERS = /(^|[^a-z])(captcha|recaptcha|hcaptcha)([^a-z]|$)/i;
   const PHONE_HINT = /\b(phone|telephone|mobile|cell|whats?app|fax|tel|contact[ _-]?(number|no|#)?|mobile[ _-]?(number|no|#)?|phone[ _-]?(number|no|#)?)\b/i;
   const COUNTRY_ALIASES = { US: ["us", "united states", "united states of america"], CA: ["ca", "canada"], GB: ["gb", "uk", "united kingdom", "great britain"], AU: ["au", "australia"] };
   const FIELD_RULES = {
@@ -34,16 +37,215 @@
     return labels.join(" ");
   }
 
+  function accessibleLabelText(element) {
+    const labelledBy = String(element.getAttribute?.("aria-labelledby") || "").trim();
+    const referencedLabels = labelledBy.split(/\s+/).filter(Boolean).map((id) => document.getElementById(id)).filter(Boolean).map((label) => label.textContent || "");
+    const labels = element.labels ? Array.from(element.labels).map((label) => label.textContent || "") : [];
+    const wrappingLabel = element.closest?.("label")?.textContent || "";
+    const uniqueLabels = [...new Set([...labels, wrappingLabel].map((label) => label.trim()).filter(Boolean))];
+    return {
+      label: uniqueLabels.join(" ").trim(),
+      ariaLabel: String(element.getAttribute?.("aria-label") || "").trim(),
+      ariaLabelledBy: referencedLabels.join(" ").trim()
+    };
+  }
+
+  function collectFieldSignals(element) {
+    const accessible = accessibleLabelText(element);
+    return {
+      type: String(element.type || "").trim(),
+      autocomplete: String(element.getAttribute?.("autocomplete") || "").trim(),
+      name: String(element.name || "").trim(),
+      id: String(element.id || "").trim(),
+      label: accessible.label,
+      ariaLabel: accessible.ariaLabel,
+      ariaLabelledBy: accessible.ariaLabelledBy,
+      placeholder: String(element.placeholder || element.getAttribute?.("placeholder") || "").trim(),
+      className: String(element.className || "").trim(),
+      nearbyText: [element.previousElementSibling, element.parentElement?.previousElementSibling]
+        .filter(Boolean).map((item) => item.textContent || "").join(" ").trim()
+    };
+  }
+
+  function normalizeFieldText(value) {
+    return String(value || "")
+      .trim()
+      .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+      .replace(/([A-Za-z])(\d)/g, "$1 $2")
+      .replace(/(\d)([A-Za-z])/g, "$1 $2")
+      .replace(/[\s_-]+/g, " ")
+      .replace(/[^\w ]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  function compactFieldText(value) {
+    return normalizeFieldText(value).replace(/ /g, "");
+  }
+
+  function normalizeFieldSignals(signals) {
+    const raw = { ...signals };
+    const fields = Object.keys(raw).filter((key) => key !== "type");
+    const tokens = Object.fromEntries(fields.map((key) => [key, normalizeFieldText(raw[key])]));
+    const compact = Object.fromEntries(fields.map((key) => [key, compactFieldText(raw[key])]));
+    return { raw, tokens, compact };
+  }
+
+  const CANONICAL_FIELD_TYPES = Object.freeze({
+    firstName: "firstName", lastName: "lastName", fullName: "fullName", email: "email", confirmEmail: "confirmEmail", phone: "phone",
+    company: "company", department: "department", jobTitle: "jobTitle", address1: "address1", address2: "address2", city: "city",
+    state: "state", country: "country", postalCode: "postalCode", website: "website", username: "username", password: "password",
+    confirmPassword: "confirmPassword", passport: "passport", nationalId: "nationalId", employeeId: "employeeId", taxId: "taxId",
+    accountNumber: "accountNumber", message: "message", genericText: "genericText", number: "number", decimal: "decimal",
+    percentage: "percentage", age: "age", quantity: "quantity", price: "price", date: "date", dateTime: "dateTime", time: "time",
+    month: "month", week: "week", range: "range", color: "color"
+  });
+  const FIELD_ALIASES = Object.freeze({
+    firstName: ["first name", "firstname", "given name", "givenname", "forename", "fname"],
+    lastName: ["last name", "lastname", "surname", "family name", "familyname", "second name", "secondname", "lname"],
+    fullName: ["full name", "fullname", "contact name", "contactname", "customer name", "customername", "applicant name", "applicantname", "person name", "personname", "your name", "yourname", "name"],
+    email: ["email", "email address", "emailaddress", "e mail", "mail", "mail id", "mailid"],
+    confirmEmail: ["confirm email", "confirmemail", "repeat email", "repeatemail", "reenter email", "reenteremail", "retype email", "retypeemail", "verify email", "verifyemail"],
+    phone: ["phone", "phone number", "phonenumber", "telephone", "telephone number", "telephonenumber", "tel", "mobile", "mobile number", "mobilenumber", "cell", "cell phone", "cellphone", "whatsapp", "contact number", "contactnumber", "fax"],
+    company: ["company", "company name", "companyname", "organization", "organization name", "organizationname", "organisation", "organisation name", "organisationname", "business", "business name", "businessname", "employer"],
+    department: ["department", "dept", "division", "team"], jobTitle: ["job title", "jobtitle", "title", "position", "designation", "role", "occupation", "profession"],
+    address1: ["address", "address 1", "address1", "address line 1", "addressline1", "street address", "streetaddress", "street", "mailing address", "mailingaddress"],
+    address2: ["address 2", "address2", "address line 2", "addressline2", "apartment", "apartment number", "apartmentnumber", "apt", "suite", "unit"],
+    city: ["city", "town"], state: ["state", "province", "region", "county"], country: ["country", "nation"],
+    postalCode: ["postal code", "postalcode", "postcode", "post code", "zip", "zip code", "zipcode"], website: ["website", "web site", "site", "url", "web address", "webaddress", "homepage", "website url", "web url"],
+    username: ["username", "user name", "user id", "userid", "login name", "loginname"], password: ["password", "pass word", "passwd"],
+    confirmPassword: ["confirm password", "confirmpassword", "repeat password", "repeatpassword", "reenter password", "reenterpassword", "retype password", "retypepassword", "verify password", "verifypassword"],
+    passport: ["passport", "passport number", "passportnumber", "passport no", "passportno"], nationalId: ["national id", "nationalid", "national identity", "nationalidentity", "identity number", "identitynumber", "id number", "idnumber", "cnic"],
+    employeeId: ["employee id", "employeeid", "staff id", "staffid", "worker id", "workerid"], taxId: ["tax id", "taxid", "tax number", "taxnumber", "vat number", "vatnumber"], accountNumber: ["account number", "accountnumber", "account no", "accountno"],
+    message: ["message", "comments", "comment", "notes", "note", "description", "details", "enquiry", "inquiry"], genericText: [],
+    number: ["number", "numeric", "value"], decimal: ["decimal"], percentage: ["percentage", "percent", "pct"], age: ["age"], quantity: ["quantity", "qty", "count"], price: ["price", "amount", "cost", "rate", "income"],
+    date: ["date"], dateTime: ["datetime", "date time"], time: ["time"], month: ["month"], week: ["week"], range: ["range"], color: ["color", "colour"]
+  });
+  const GENERIC_FIELD_ALIASES = new Set(["name", "title", "number", "value", "address", "date", "time"]);
+  const TECHNICAL_FIELD_PREFIXES = Object.freeze(["txt", "input", "inp", "field", "fld"]);
+  const CONTEXTUAL_FIELD_MODIFIERS = new Set(["user", "customer", "contact", "applicant", "client", "member", "billing", "shipping", "primary", "secondary", "work", "home", "office", "personal", "profile", "display", "company", "organization", "organisation", "business", "emergency", "alternate", "preferred", "job"]);
+
+  function getAliasesForFieldType(type) {
+    return (FIELD_ALIASES[type] || []).slice();
+  }
+
+  function fieldAliasMatches(normalizedValue, alias) {
+    const valueTokens = normalizeFieldText(normalizedValue);
+    const aliasTokens = normalizeFieldText(alias);
+    return valueTokens === aliasTokens || compactFieldText(valueTokens) === compactFieldText(aliasTokens);
+  }
+
+  function findAliasMatches(normalizedSignal) {
+    return Object.entries(FIELD_ALIASES).filter(([, aliases]) => aliases.some((alias) => fieldAliasMatches(normalizedSignal, alias))).map(([type]) => type);
+  }
+
+  const SIGNAL_WEIGHTS = Object.freeze({ type: 120, autocomplete: 115, label: 100, ariaLabel: 100, ariaLabelledBy: 100, name: 90, id: 85, placeholder: 55, className: 20, nearbyText: 5 });
+  const CLASSIFICATION_PRIORITY = Object.freeze(["confirmEmail", "confirmPassword", "firstName", "lastName", "address2", "postalCode", "phone", "price", "quantity", "age", "percentage", "decimal", "fullName", "email", "company", "department", "jobTitle", "address1", "city", "state", "country", "website", "username", "password", "passport", "nationalId", "employeeId", "taxId", "accountNumber", "message", "dateTime", "date", "time", "month", "week", "range", "color", "number"]);
+  const AUTOCOMPLETE_TYPES = Object.freeze({ "given-name": "firstName", "family-name": "lastName", "name": "fullName", email: "email", tel: "phone", "tel-national": "phone", "tel-local": "phone", "tel-country-code": "phone", organization: "company", "organization-title": "jobTitle", "street-address": "address1", "address-line1": "address1", "address-line2": "address2", "address-level2": "city", "address-level1": "state", country: "country", "country-name": "country", "postal-code": "postalCode", url: "website", username: "username", "current-password": "password", "new-password": "password" });
+  const HTML_TYPE_TYPES = Object.freeze({ email: "email", tel: "phone", url: "website", date: "date", "datetime-local": "dateTime", time: "time", month: "month", week: "week", range: "range", color: "color", password: "password" });
+
+  function autocompleteFieldType(rawAutocomplete) {
+    const tokens = String(rawAutocomplete || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return tokens.map((token) => AUTOCOMPLETE_TYPES[token]).find(Boolean) || null;
+  }
+
+  function semanticIdentityCandidates(value) {
+    const original = normalizeFieldText(value);
+    const technical = TECHNICAL_FIELD_PREFIXES.reduce((candidate, prefix) => {
+      const prefixCompact = compactFieldText(prefix);
+      return candidate.startsWith(`${prefixCompact}`) ? candidate.slice(prefixCompact.length).trim() : candidate;
+    }, original);
+    const words = technical.split(" ").filter(Boolean);
+    const contextual = [];
+    let start = 0;
+    let end = words.length;
+    while (start < end && CONTEXTUAL_FIELD_MODIFIERS.has(words[start])) start += 1;
+    while (end > start && CONTEXTUAL_FIELD_MODIFIERS.has(words[end - 1])) end -= 1;
+    if (start || end !== words.length) contextual.push(words.slice(start, end).join(" "));
+    return [...new Set([original, technical, ...contextual].filter(Boolean))];
+  }
+
+  function classifyNormalizedFieldSignals(normalizedSignals) {
+    const candidates = [];
+    const raw = normalizedSignals.raw || {};
+    const sourceNames = ["autocomplete", "label", "ariaLabel", "ariaLabelledBy", "name", "id", "placeholder", "className", "nearbyText"];
+    const addCandidate = (type, score, source, alias, aliasStrength = "specific") => {
+      if (score < 50) return;
+      candidates.push({ type, score, source, alias, aliasStrength });
+    };
+    const type = String(raw.type || "").toLowerCase();
+    if (HTML_TYPE_TYPES[type]) addCandidate(HTML_TYPE_TYPES[type], SIGNAL_WEIGHTS.type, "type", type);
+    const autocomplete = autocompleteFieldType(raw.autocomplete);
+    if (autocomplete) addCandidate(autocomplete, SIGNAL_WEIGHTS.autocomplete, "autocomplete", String(raw.autocomplete || "").trim().toLowerCase().split(/\s+/).find((token) => AUTOCOMPLETE_TYPES[token] === autocomplete));
+    for (const source of sourceNames.slice(1)) {
+      const value = normalizedSignals.tokens?.[source] || normalizeFieldText(raw[source]);
+      if (!value) continue;
+      const contextualSource = ["label", "ariaLabel", "ariaLabelledBy", "name", "id", "placeholder"].includes(source);
+      for (const semanticValue of contextualSource ? semanticIdentityCandidates(value) : [value]) {
+        for (const matchedType of findAliasMatches(semanticValue)) {
+          const alias = getAliasesForFieldType(matchedType).find((item) => fieldAliasMatches(semanticValue, item));
+          const aliasStrength = GENERIC_FIELD_ALIASES.has(compactFieldText(alias)) ? "generic" : "specific";
+          addCandidate(matchedType, SIGNAL_WEIGHTS[source] - (aliasStrength === "generic" ? 20 : 0), source, alias, aliasStrength);
+        }
+      }
+    }
+    if (type === "number") {
+      const numericTypes = new Set(["postalCode", "price", "quantity", "age", "percentage", "decimal", "number"]);
+      for (let index = candidates.length - 1; index >= 0; index -= 1) if (candidates[index].source !== "type" && !numericTypes.has(candidates[index].type)) candidates.splice(index, 1);
+      if (!candidates.some((candidate) => candidate.source !== "type")) addCandidate("number", 50, "type", type);
+    }
+    const confirmSource = new Set(["autocomplete", "label", "ariaLabel", "ariaLabelledBy", "name", "id", "placeholder"]);
+    const specialization = type === "email" ? "confirmEmail" : type === "password" ? "confirmPassword" : null;
+    const specializedCandidate = specialization && candidates.find((candidate) => candidate.type === specialization && confirmSource.has(candidate.source));
+    if (specializedCandidate) specializedCandidate.score = SIGNAL_WEIGHTS.type + 1;
+    const bestByType = new Map();
+    for (const candidate of candidates) {
+      const current = bestByType.get(candidate.type);
+      if (!current || candidate.score > current.score || (candidate.score === current.score && CLASSIFICATION_PRIORITY.indexOf(candidate.type) < CLASSIFICATION_PRIORITY.indexOf(current.type))) bestByType.set(candidate.type, candidate);
+    }
+    const ranked = [...bestByType.values()].sort((a, b) => b.score - a.score || CLASSIFICATION_PRIORITY.indexOf(a.type) - CLASSIFICATION_PRIORITY.indexOf(b.type));
+    const winner = ranked[0] || null;
+    return { type: winner?.type || null, score: winner?.score || 0, source: winner?.source || null, alias: winner?.alias || null, aliasStrength: winner?.aliasStrength || null, candidates: ranked };
+  }
+
+  function runtimeFieldTypeFor(type) {
+    if (type === "confirmEmail") return "email";
+    if (type === "confirmPassword") return "password";
+    if (type === "state") return "stateRegion";
+    return type;
+  }
+
+  globalThis.WebPloverFieldSignals = { collectFieldSignals, normalizeFieldText, compactFieldText, normalizeFieldSignals, CANONICAL_FIELD_TYPES, FIELD_ALIASES, GENERIC_FIELD_ALIASES, TECHNICAL_FIELD_PREFIXES, getAliasesForFieldType, fieldAliasMatches, findAliasMatches, autocompleteFieldType, classifyNormalizedFieldSignals, runtimeFieldTypeFor, isStructurallyFillable, protectedFieldReason };
+
   function hints(element) {
     const nearby = [element.previousElementSibling, element.parentElement?.previousElementSibling, element.parentElement?.querySelector("label")]
       .filter(Boolean).map((item) => item.textContent).join(" ");
     return [element.name, element.id, element.className, element.placeholder, element.getAttribute("aria-label"), labelText(element), nearby].join(" ");
   }
 
-  function eligible(element) {
+  function isStructurallyFillable(element) {
     if (!element || element.disabled || element.readOnly || !visible(element)) return false;
-    const type = (element.type || "").toLowerCase();
-    return !["password", "hidden", "file", "submit", "button", "reset", "checkbox", "radio", "image", "date", "datetime-local", "time", "month", "week", "range", "color", "search"].includes(type) && !PROTECTED_HINT.test(hints(element));
+    return !PROTECTED_INPUT_TYPES.includes((element.type || "").toLowerCase());
+  }
+
+  function protectedFieldReason(element) {
+    if (!element) return null;
+    const signals = collectFieldSignals(element);
+    const autocompleteTokens = String(signals.autocomplete || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (autocompleteTokens.some((token) => PROTECTED_AUTOCOMPLETE.has(token))) return autocompleteTokens.find((token) => PROTECTED_AUTOCOMPLETE.has(token)) === "one-time-code" ? "otp" : "payment-card";
+    const semanticText = [signals.name, signals.id, signals.label, signals.ariaLabel, signals.ariaLabelledBy, signals.placeholder].map((value) => normalizeFieldText(value)).join(" ");
+    if (/\b(otp|one time( code)?|authentication code|security code|verification code|passcode)\b/i.test(semanticText)) return "otp";
+    if (/\b(ssn|social security( number)?)\b/i.test(semanticText)) return "social-security";
+    if (/(^|[^a-z])(captcha|recaptcha|hcaptcha)([^a-z]|$)/i.test(semanticText) || PROTECTED_INPUT_MARKERS.test(String(signals.className || ""))) return "captcha";
+    if (/\b(credit card|debit card|card number|card security code|card verification code|cvv|cvc)\b/i.test(semanticText)) return "payment-card";
+    if (/\b(iban|routing number|bank account|swift|bic)\b/i.test(semanticText)) return "banking";
+    if (/\b(driver[ -]?s license|driver license)\b/i.test(semanticText)) return "driver-license";
+    return null;
+  }
+
+  function eligible(element) {
+    return isStructurallyFillable(element) && !protectedFieldReason(element);
   }
 
   function compatible(element, key) {
@@ -262,44 +464,9 @@
   }
 
   function classifyField(element) {
-    const type = (element.type || "").toLowerCase();
-    const text = hints(element).toLowerCase();
-    const autocomplete = (element.getAttribute("autocomplete") || "").toLowerCase().trim().split(/\s+/).pop();
     if (!eligible(element) || !canFill(element)) return null;
-    if (type === "email") return "email";
-    if (type === "tel") return "phone";
-    if (type === "url") return "website";
-    if (type === "number") return /decimal|price|amount|cost|rate|ratio/.test(text) ? "decimal" : /zip|postal|code|phone|mobile|tel|contact/.test(text) ? "postalCode" : "number";
-    if (autocomplete === "given-name") return "firstName";
-    if (autocomplete === "family-name" || autocomplete === "last-name") return "lastName";
-    if (autocomplete === "name") return "fullName";
-    if (autocomplete === "organization") return "company";
-    if (autocomplete === "address-line1" || autocomplete === "street-address") return "address1";
-    if (autocomplete === "address-line2") return "address2";
-    if (autocomplete === "address-level2") return "city";
-    if (autocomplete === "address-level1") return "stateRegion";
-    if (autocomplete === "postal-code") return "postalCode";
-    if (autocomplete === "country" || autocomplete === "country-name") return "country";
-    if (autocomplete === "url") return "website";
-    if (autocomplete === "organization-title") return "jobTitle";
-    if (FIELD_RULES.firstName.hint.test(text)) return "firstName";
-    if (FIELD_RULES.lastName.hint.test(text)) return "lastName";
-    if (normalizeIdentityPart(element.name || "") === "name" || normalizeIdentityPart(labelText(element)) === "name" || /^name$/i.test(text) || /\b(full[ _-]?name|your name|contact name|customer name|person name)\b/i.test(text)) return "fullName";
-    if (FIELD_RULES.email.hint.test(text)) return "email";
-    if (FIELD_RULES.phone.hint.test(text)) return "phone";
-    if (/\b(company|organisation|organization|employer)\b/i.test(text)) return "company";
-    if (/\bdepartment( name)?|\bdept\b/i.test(text)) return "department";
-    if (/\baddress\b/i.test(text)) return /\b(line|suite|unit|apt|apartment|address 2|address two)\b/i.test(text) ? "address2" : "address1";
-    if (FIELD_RULES.address1.hint.test(text)) return "address1";
-    if (FIELD_RULES.address2.hint.test(text)) return "address2";
-    if (FIELD_RULES.city.hint.test(text)) return "city";
-    if (FIELD_RULES.stateRegion.hint.test(text)) return "stateRegion";
-    if (FIELD_RULES.postalCode.hint.test(text)) return "postalCode";
-    if (FIELD_RULES.country.hint.test(text)) return "country";
-    if (FIELD_RULES.website.hint.test(text)) return "website";
-    if (FIELD_RULES.jobTitle.hint.test(text)) return "jobTitle";
-    if (FIELD_RULES.message.hint.test(text)) return "message";
-    return null;
+    const semantic = classifyNormalizedFieldSignals(normalizeFieldSignals(collectFieldSignals(element)));
+    return semantic.type ? runtimeFieldTypeFor(semantic.type) : null;
   }
 
   function fallbackValue(element, profile) {
@@ -360,9 +527,16 @@
     return profile?.[key] || fallbackValue(element, profile);
   }
 
+  const DEFERRED_UNSUPPORTED_TYPES = new Set(["passport", "nationalId", "employeeId", "taxId", "accountNumber", "username"]);
+
+  function deferredUnsupportedField(element) {
+    const semantic = classifyNormalizedFieldSignals(normalizeFieldSignals(collectFieldSignals(element)));
+    return DEFERRED_UNSUPPORTED_TYPES.has(semantic.type);
+  }
+
   function fillSafeField(element, profile) {
     const key = classifyField(element);
-    if (!key) return false;
+    if (!key || deferredUnsupportedField(element)) return false;
     const value = valueForField(key, profile, element);
     return setValue(element, value, key === "number" ? "postalCode" : key);
   }

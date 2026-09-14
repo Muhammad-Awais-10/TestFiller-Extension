@@ -79,6 +79,67 @@ const assert = (condition, label) => { if (!condition) throw new Error(label); }
   }
   vm.createContext(fillContext);
   vm.runInContext(fs.readFileSync("src/content/content-script.js", "utf8"), fillContext);
+  const normalized = fillContext.WebPloverFieldSignals;
+  const normalizationCases = {
+    first_name: ["first name", "firstname"],
+    "first-name": ["first name", "firstname"],
+    firstName: ["first name", "firstname"],
+    FirstName: ["first name", "firstname"],
+    FIRST_NAME: ["first name", "firstname"],
+    customerName: ["customer name", "customername"],
+    contact_name: ["contact name", "contactname"],
+    txtFirstName: ["txt first name", "txtfirstname"],
+    emailAddress: ["email address", "emailaddress"],
+    mobile_number: ["mobile number", "mobilenumber"],
+    addressLine1: ["address line 1", "addressline1"],
+    postal_code: ["postal code", "postalcode"],
+    jobTitle: ["job title", "jobtitle"],
+    companyName: ["company name", "companyname"]
+  };
+  Object.entries(normalizationCases).forEach(([input, [tokens, compact]]) => {
+    assert(normalized.normalizeFieldText(input) === tokens && normalized.compactFieldText(input) === compact, `field normalization: ${input}`);
+  });
+  const normalizedSignals = normalized.normalizeFieldSignals({ name: "firstName", label: "First Name", nearbyText: "Customer Details" });
+  assert(normalizedSignals.raw.name === "firstName" && normalizedSignals.tokens.name === "first name" && normalizedSignals.compact.label === "firstname" && normalizedSignals.tokens.nearbyText === "customer details" && normalizedSignals.compact.nearbyText === "customerdetails" && !normalizedSignals.tokens.label.includes("customer"), "structured normalized signals");
+  const aliasCases = { firstName: "firstName", first_name: "firstName", givenName: "firstName", surname: "lastName", customerName: "fullName", contact_name: "fullName", emailAddress: "email", confirmEmail: "confirmEmail", mobileNumber: "phone", contact_number: "phone", companyName: "company", jobTitle: "jobTitle", addressLine1: "address1", addressLine2: "address2", postalCode: "postalCode", zipCode: "postalCode", passportNumber: "passport", nationalId: "nationalId", employeeId: "employeeId", quantity: "quantity", price: "price", confirmPassword: "confirmPassword" };
+  Object.entries(aliasCases).forEach(([input, expected]) => assert(normalized.findAliasMatches(normalized.normalizeFieldText(input)).includes(expected), `field alias: ${input}`));
+  const exactAliasCases = {
+    confirmEmail: ["confirmEmail"], confirm_email: ["confirmEmail"], repeatEmail: ["confirmEmail"], reenterEmail: ["confirmEmail"], retypeEmail: ["confirmEmail"], verifyEmail: ["confirmEmail"], email: ["email"], emailAddress: ["email"],
+    confirmPassword: ["confirmPassword"], confirm_password: ["confirmPassword"], repeatPassword: ["confirmPassword"], reenterPassword: ["confirmPassword"], retypePassword: ["confirmPassword"], verifyPassword: ["confirmPassword"], password: ["password"], passwd: ["password"],
+    firstName: ["firstName"], lastName: ["lastName"], fullName: ["fullName"], customerName: ["fullName"], companyName: ["company"], username: ["username"], postalCode: ["postalCode"], passportNumber: ["passport"]
+  };
+  Object.entries(exactAliasCases).forEach(([input, expected]) => assert(JSON.stringify(normalized.findAliasMatches(normalized.normalizeFieldText(input))) === JSON.stringify(expected), `exact field alias: ${input}`));
+  ["firstname", "lastname", "username", "companyname", "filename", "hostname", "numberplate", "update", "statement", "countrycode"].forEach((input) => assert(!normalized.findAliasMatches(normalized.normalizeFieldText(input)).includes("fullName"), `field alias false positive: ${input}`));
+  assert(!normalized.findAliasMatches("numberplate").includes("number"), "number alias boundary");
+  assert(!normalized.findAliasMatches("update").includes("date"), "date alias boundary");
+  assert(!normalized.findAliasMatches("statement").includes("state"), "state alias boundary");
+  assert(!normalized.findAliasMatches("country code").includes("postalCode"), "country code alias boundary");
+  const classify = (signals) => normalized.classifyNormalizedFieldSignals(normalized.normalizeFieldSignals(signals));
+  const classificationCases = { firstName: [{ name: "first_name" }, "firstName"], fullName: [{ name: "customerName" }, "fullName"], email: [{ name: "emailAddress" }, "email"], phone: [{ name: "mobileNumber" }, "phone"], company: [{ name: "companyName" }, "company"], postalCode: [{ type: "number", name: "postalCode" }, "postalCode"], price: [{ type: "number", name: "price" }, "price"], quantity: [{ type: "number", name: "quantity" }, "quantity"], age: [{ type: "number", name: "age" }, "age"], percentage: [{ type: "number", name: "percentage" }, "percentage"], number: [{ type: "number", name: "randomField" }, "number"], typeEmail: [{ type: "email", name: "random" }, "email"] };
+  const contextualCases = { userFirstName: "firstName", customerFirstName: "firstName", applicantFirstName: "firstName", userLastName: "lastName", customerLastName: "lastName", billingEmail: "email", workEmail: "email", contactEmail: "email", companyEmail: "email", primaryEmail: "email", homePhone: "phone", workPhone: "phone", officePhone: "phone", customerPhone: "phone", companyPhone: "phone", billingAddressLine1: "address1", shippingAddressLine1: "address1", billingCity: "city", shippingCity: "city", billingState: "state", shippingState: "state", billingPostalCode: "postalCode", shippingZipCode: "postalCode", billingCountry: "country", shippingCountry: "country", userFullName: "fullName", profileName: "fullName", displayName: "fullName", userid: "username", websiteUrl: "website", companyWebsite: "website", personalWebsite: "website", homepage: "website", occupation: "jobTitle", profession: "jobTitle" };
+  Object.entries(classificationCases).forEach(([label, [signals, expected]]) => assert(classify(signals).type === expected, `semantic classification: ${label}`));
+  Object.entries(contextualCases).forEach(([name, expected]) => assert(classify({ name }).type === expected, `contextual classification: ${name}`));
+  ["filename", "hostname", "numberPlate", "statement", "update"].forEach((name) => assert(classify({ name }).type === null, `contextual false positive: ${name}`));
+  assert(classify({ type: "number", name: "phone" }).type === "number" && classify({ type: "number", name: "mobileNumber" }).type === "number" && classify({ type: "number", name: "randomField" }).type === "number" && classify({ type: "number", name: "postalCode" }).type === "postalCode" && classify({ type: "number", name: "price" }).type === "price" && classify({ type: "number", name: "quantity" }).type === "quantity", "number type precedence");
+  const autocompleteCases = { "given-name": "firstName", "family-name": "lastName", name: "fullName", email: "email", tel: "phone", "tel-national": "phone", "tel-local": "phone", "tel-country-code": "phone", organization: "company", "organization-title": "jobTitle", "street-address": "address1", "address-line1": "address1", "address-line2": "address2", "address-level2": "city", "address-level1": "state", country: "country", "country-name": "country", "postal-code": "postalCode", url: "website", username: "username", "current-password": "password", "new-password": "password" };
+  Object.entries(autocompleteCases).forEach(([input, expected]) => assert(classify({ autocomplete: input }).type === expected, `autocomplete classification: ${input}`));
+  const multiAutocompleteCases = { "section-checkout shipping given-name": "firstName", "billing postal-code": "postalCode", "section-user home tel-national": "phone", "shipping address-line1": "address1", "section-profile organization-title": "jobTitle" };
+  Object.entries(multiAutocompleteCases).forEach(([input, expected]) => assert(classify({ autocomplete: input }).type === expected, `multi-token autocomplete: ${input}`));
+  const confirmCases = { confirmEmail: [{ type: "email", name: "confirmEmail" }, "confirmEmail"], confirm_email: [{ type: "email", name: "confirm_email" }, "confirmEmail"], repeatEmail: [{ type: "email", name: "repeatEmail" }, "confirmEmail"], "Confirm Email": [{ type: "email", label: "Confirm Email" }, "confirmEmail"], repeatPassword: [{ type: "password", name: "repeatPassword" }, "confirmPassword"], confirmPassword: [{ type: "password", name: "confirmPassword" }, "confirmPassword"], "Confirm Password": [{ type: "password", label: "Confirm Password" }, "confirmPassword" ] };
+  Object.entries(confirmCases).forEach(([label, [signals, expected]]) => assert(classify(signals).type === expected, `confirm specialization: ${label}`));
+  assert(classify({ type: "email", name: "phone" }).type === "email" && classify({ type: "email", className: "phone", nearbyText: "Phone" }).type === "email" && classify({ type: "password", name: "username" }).type === "password", "HTML type conflict safety");
+  ["filename", "hostname", "statement", "update", "numberplate"].forEach((name) => assert(classify({ name }).type === null, `semantic classification false positive: ${name}`));
+  assert(classify({ className: "email" }).type === null && classify({ nearbyText: "Phone Number" }).type === null, "weak signals do not classify");
+  assert(classify({ name: "customer_name", className: "email-field" }).type === "fullName" && classify({ type: "email", className: "phone" }).type === "email", "semantic signal conflict");
+  const policyField = (signals) => ({ ...signals, type: signals.type || "text", disabled: false, readOnly: false, getAttribute: (name) => signals[name] || "", labels: signals.label ? [{ textContent: signals.label }] : [], getBoundingClientRect: () => ({ width: 1, height: 1 }) });
+  const allowedIdentifiers = ["passportNumber", "passport_number", "nationalId", "cnic", "employeeId", "taxId", "accountNumber", "username"];
+  allowedIdentifiers.forEach((name) => assert(!normalized.protectedFieldReason(policyField({ name })), `allowed identifier policy: ${name}`));
+  ["Passport Number", "National ID", "Employee ID"].forEach((label) => assert(!normalized.protectedFieldReason(policyField({ label })), `allowed label policy: ${label}`));
+  ["otp", "captcha", "recaptcha_response", "cardNumber", "cvv", "cvc", "iban", "routingNumber", "swift", "ssn"].forEach((name) => assert(normalized.protectedFieldReason(policyField({ name })), `protected policy: ${name}`));
+  ["OTP Code", "One-Time Code", "Verification Code", "Credit Card Number", "Bank Account Number", "Social Security Number"].forEach((label) => assert(normalized.protectedFieldReason(policyField({ label })), `protected label policy: ${label}`));
+  assert(normalized.protectedFieldReason(policyField({ autocomplete: "one-time-code" })) === "otp" && normalized.protectedFieldReason(policyField({ autocomplete: "cc-number" })) === "payment-card", "protected autocomplete policy");
+  ["Verify Email", "Email Verification"].forEach((label) => assert(!normalized.protectedFieldReason(policyField({ label })), `verification false positive: ${label}`));
+  assert(!normalized.protectedFieldReason(policyField({ name: "customerName", nearbyText: "Bank Details" })) && !normalized.protectedFieldReason(policyField({ name: "accountNumber" })) && normalized.protectedFieldReason(policyField({ label: "Bank Account Number" })), "context-sensitive banking policy");
   const fill = (profile) => { let result; fillListener({ type: "FILL_CONTACT_PROFILE", profile }, null, (response) => { result = response; }); return result; };
   const firstProfile = { ...WebPlover.contactProfile({ email: "first@example.com", allocationId: "first", namePrefix: "Alpha", nameSuffix: "One" }), firstName: "Alpha First", lastName: "One Last", fullName: "Alpha First One Last", otherText: "First lorem" };
   const secondProfile = { ...WebPlover.contactProfile({ email: "second@example.com", allocationId: "second", namePrefix: "Beta", nameSuffix: "Two" }), firstName: "Beta First", lastName: "Two Last", fullName: "Beta First Two Last", otherText: "Second lorem" };
