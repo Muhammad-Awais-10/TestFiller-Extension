@@ -288,6 +288,52 @@ const assert = (condition, label) => { if (!condition) throw new Error(label); }
   assert(fallbackFields[9].value.length > 0, "fills pattern numeric field");
   assert(fallbackFields[10].value === "already here", "preserves filled manual field");
 
+  const explicitPhoneProfile = { phone: "+92 3123456789", otherText: "Lorem ipsum dolor sit amet" };
+  const explicitPhoneFields = [
+    makeField("Mobile", "text", { placeholder: "Mobile" }),
+    makeField("Mobile Number", "text", { placeholder: "Mobile Number" }),
+    makeField("Phone", "tel", { placeholder: "Phone" }),
+    makeField("Phone Number", "tel", { placeholder: "Phone Number" }),
+    makeField("Cell", "text", { placeholder: "Cell" }),
+    makeField("Cell Number", "text", { placeholder: "Cell Number" }),
+    makeField("Mobile Number", "number", { placeholder: "Mobile Number" }),
+    makeField("Phone", "number"),
+    makeField("Age", "number"),
+    makeField("Quantity", "number"),
+    makeField("Price", "number")
+  ];
+  fallbackFields.push(...explicitPhoneFields);
+  fallbackContext.listener({ type: "FILL_CONTACT_PROFILE", profile: explicitPhoneProfile }, null, () => {});
+  [0, 1, 2, 3, 4, 5].forEach((index) => assert(explicitPhoneFields[index].value === explicitPhoneProfile.phone, `fills explicit ${["Mobile", "Mobile Number", "Phone", "Phone Number", "Cell", "Cell Number"][index]} phone`));
+  assert(explicitPhoneFields[6].value === "923123456789" && explicitPhoneFields[7].value === "923123456789", "number phone uses profile digits");
+  assert(explicitPhoneFields[8].value !== "923123456789" && explicitPhoneFields[9].value !== "923123456789" && explicitPhoneFields[10].value !== "923123456789", "ordinary numbers remain numeric");
+  assert(!normalized.isExplicitPhoneField(policyField({ placeholder: "Age", nearbyText: "Phone" })) && !normalized.isExplicitPhoneField(policyField({ label: "Quantity", nearbyText: "Phone" })), "explicit phone ignores noisy nearby text");
+  const refillFields = [
+    makeField("Text Phone", "text", { placeholder: "Phone" }),
+    makeField("Tel Phone", "tel", { placeholder: "Phone Number" }),
+    makeField("Number Phone", "number", { placeholder: "Mobile Number" }),
+    makeField("", "text", { placeholder: "Mobile Number" })
+  ];
+  refillFields[3].labels = [];
+  refillFields[3].name = "rerender-phone";
+  fallbackContext.document.querySelectorAll = (selector) => selector === "input, textarea, select, [contenteditable=\"true\"]" ? fallbackFields.concat(refillFields) : [];
+  const refillProfile1 = { phone: "+92 3109925691", otherText: "Lorem ipsum dolor sit amet" };
+  const refillProfile2 = { phone: "+92 3109925692", otherText: "Lorem ipsum dolor sit amet" };
+  fallbackContext.listener({ type: "FILL_CONTACT_PROFILE", profile: refillProfile1 }, null, () => {});
+  assert(refillFields[0].value === refillProfile1.phone && refillFields[1].value === refillProfile1.phone && refillFields[2].value === "923109925691" && refillFields[3].value === refillProfile1.phone, "initial phone refill values");
+  refillFields[0].value = "+92 (310) 992-5691";
+  const rerenderedPlaceholderPhone = makeField("", "text", { placeholder: "Mobile Number" });
+  rerenderedPlaceholderPhone.labels = [];
+  rerenderedPlaceholderPhone.name = "rerender-phone";
+  rerenderedPlaceholderPhone.value = refillProfile1.phone;
+  refillFields[3] = rerenderedPlaceholderPhone;
+  fallbackContext.listener({ type: "FILL_CONTACT_PROFILE", profile: refillProfile2 }, null, () => {});
+  assert(refillFields[0].value === refillProfile2.phone && refillFields[1].value === refillProfile2.phone && refillFields[2].value === "923109925692" && refillFields[3].value === refillProfile2.phone, `repeated phone refill values: ${refillFields.map((field) => field.value).join("|")}`);
+  refillFields[0].value = "+92 3331234567";
+  const refillProfile3 = { phone: "+92 3109925693", otherText: "Lorem ipsum dolor sit amet" };
+  fallbackContext.listener({ type: "FILL_CONTACT_PROFILE", profile: refillProfile3 }, null, () => {});
+  assert(refillFields[0].value === "+92 3331234567", "preserves manually edited phone");
+
   const normalButton = new FakeButton("Contact form owner", { role: "button" });
   const dropdownOption = new FakeButton("Choose one", { role: "option" });
   const dropdown = new FakeListbox("Select an option", { role: "button", "aria-haspopup": "listbox", "aria-controls": "dropdown-1" });

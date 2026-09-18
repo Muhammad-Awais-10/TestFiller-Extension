@@ -92,6 +92,12 @@
     return { raw, tokens, compact };
   }
 
+  function isExplicitPhoneField(element) {
+    const signals = collectFieldSignals(element);
+    const accepted = new Set(["mobile", "mobile number", "phone", "phone number", "cell", "cell number"]);
+    return [signals.label, signals.placeholder].some((value) => accepted.has(normalizeFieldText(value)));
+  }
+
   const CANONICAL_FIELD_TYPES = Object.freeze({
     firstName: "firstName", lastName: "lastName", fullName: "fullName", email: "email", confirmEmail: "confirmEmail", phone: "phone",
     company: "company", department: "department", jobTitle: "jobTitle", address1: "address1", address2: "address2", city: "city",
@@ -216,7 +222,7 @@
     return type;
   }
 
-  globalThis.WebPloverFieldSignals = { collectFieldSignals, normalizeFieldText, compactFieldText, normalizeFieldSignals, CANONICAL_FIELD_TYPES, FIELD_ALIASES, GENERIC_FIELD_ALIASES, TECHNICAL_FIELD_PREFIXES, getAliasesForFieldType, fieldAliasMatches, findAliasMatches, autocompleteFieldType, classifyNormalizedFieldSignals, runtimeFieldTypeFor, isStructurallyFillable, protectedFieldReason };
+  globalThis.WebPloverFieldSignals = { collectFieldSignals, normalizeFieldText, compactFieldText, normalizeFieldSignals, isExplicitPhoneField, CANONICAL_FIELD_TYPES, FIELD_ALIASES, GENERIC_FIELD_ALIASES, TECHNICAL_FIELD_PREFIXES, getAliasesForFieldType, fieldAliasMatches, findAliasMatches, autocompleteFieldType, classifyNormalizedFieldSignals, runtimeFieldTypeFor, isStructurallyFillable, protectedFieldReason };
 
   function hints(element) {
     const nearby = [element.previousElementSibling, element.parentElement?.previousElementSibling, element.parentElement?.querySelector("label")]
@@ -273,6 +279,7 @@
   function normalizeTrackedValue(element, value) {
     const text = String(value || "").trim();
     const type = (element.type || "").toLowerCase();
+    if (isExplicitPhoneField(element)) return text.replace(/\D+/g, "");
     if (type === "tel") return text.replace(/\D+/g, "");
     if (type === "number") return text === "" ? "" : String(Number(text));
     return text;
@@ -286,6 +293,7 @@
     const type = normalizeIdentityPart(element.type || "");
     const autocomplete = normalizeIdentityPart(element.getAttribute("autocomplete") || "");
     const label = normalizeIdentityPart(labelText(element));
+    const placeholder = isExplicitPhoneField(element) ? normalizeIdentityPart(element.placeholder || element.getAttribute("placeholder") || "") : "";
     const aria = normalizeIdentityPart(element.getAttribute("aria-label") || "");
     const dataSlug = normalizeIdentityPart(element.getAttribute("data-slug") || "");
     const name = normalizeIdentityPart(element.name || "");
@@ -296,6 +304,7 @@
     if (autocomplete) keys.push(`autocomplete:${autocomplete}`);
     if (aria) keys.push(`aria:${aria}`);
     if (label) keys.push(`label:${label}`);
+    if (placeholder && type) keys.push(`phone-placeholder:${placeholder}|type:${type}`);
     if (id) keys.push(`id:${id}`);
     if (name && type) keys.push(`name:${name}|type:${type}`);
     if (dataSlug && type) keys.push(`slug:${dataSlug}|type:${type}`);
@@ -465,6 +474,7 @@
 
   function classifyField(element) {
     if (!eligible(element) || !canFill(element)) return null;
+    if (isExplicitPhoneField(element)) return "phone";
     const semantic = classifyNormalizedFieldSignals(normalizeFieldSignals(collectFieldSignals(element)));
     return semantic.type ? runtimeFieldTypeFor(semantic.type) : null;
   }
@@ -503,6 +513,7 @@
     const type = (element.type || "").toLowerCase();
     const mode = (element.getAttribute("inputmode") || "").toLowerCase();
     const text = hints(element).toLowerCase();
+    if (isExplicitPhoneField(element)) return type === "number" ? (profile?.phone || "+1 555-0100").replace(/\D/g, "") : (profile?.phone || "+1 555-0100");
     if (type === "email") return profile?.email || "test@example.com";
     if (type === "tel" || PHONE_HINT.test(text) || mode === "tel") return profile?.phone || "+1 555-0100";
     if (type === "url") return profile?.website || "https://example.com";
@@ -601,7 +612,8 @@
   }
 
   function setValue(element, value, key) {
-    const nextValue = element instanceof HTMLSelectElement ? optionValue(element, value, key) : value;
+    const type = (element.type || "").toLowerCase();
+    const nextValue = element instanceof HTMLSelectElement ? optionValue(element, value, key) : isExplicitPhoneField(element) && type === "number" ? String(value).replace(/\D/g, "") : value;
     if (!nextValue) return false;
     try {
       if (element.isContentEditable) element.textContent = nextValue;
